@@ -46,6 +46,8 @@ type FlunderSpec struct {
 	FischerReference string `json:"fischerReference,omitempty" protobuf:"bytes,2,opt,name=fischerReference"`
 	// The reference type.
 	ReferenceType ReferenceType `json:"referenceType,omitempty" protobuf:"bytes,3,opt,name=referenceType"`
+
+	Foo string `json:"foo"`
 }
 
 // FlunderStatus is the status of a Flunder.

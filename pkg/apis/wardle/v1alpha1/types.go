@@ -40,6 +40,8 @@ type FlunderSpec struct {
 	Reference string `json:"reference,omitempty" protobuf:"bytes,1,opt,name=reference"`
 	// The reference type, defaults to "Flunder" if reference is set.
 	ReferenceType *ReferenceType `json:"referenceType,omitempty" protobuf:"bytes,2,opt,name=referenceType"`
+
+	Foo string `json:"foo"`
 }
 
 type FlunderStatus struct {
