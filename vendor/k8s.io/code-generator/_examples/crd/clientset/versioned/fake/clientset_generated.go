@@ -1,5 +1,5 @@
 /*
-Copyright The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,10 +43,9 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 		}
 	}
 
-	cs := &Clientset{}
-	cs.discovery = &fakediscovery.FakeDiscovery{Fake: &cs.Fake}
-	cs.AddReactor("*", "*", testing.ObjectReaction(o))
-	cs.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
+	fakePtr := testing.Fake{}
+	fakePtr.AddReactor("*", "*", testing.ObjectReaction(o))
+	fakePtr.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
 		gvr := action.GetResource()
 		ns := action.GetNamespace()
 		watch, err := o.Watch(gvr, ns)
@@ -56,7 +55,7 @@ func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 		return true, watch, nil
 	})
 
-	return cs
+	return &Clientset{fakePtr, &fakediscovery.FakeDiscovery{Fake: &fakePtr}}
 }
 
 // Clientset implements clientset.Interface. Meant to be embedded into a
@@ -78,7 +77,17 @@ func (c *Clientset) ExampleV1() examplev1.ExampleV1Interface {
 	return &fakeexamplev1.FakeExampleV1{Fake: &c.Fake}
 }
 
+// Example retrieves the ExampleV1Client
+func (c *Clientset) Example() examplev1.ExampleV1Interface {
+	return &fakeexamplev1.FakeExampleV1{Fake: &c.Fake}
+}
+
 // SecondExampleV1 retrieves the SecondExampleV1Client
 func (c *Clientset) SecondExampleV1() secondexamplev1.SecondExampleV1Interface {
+	return &fakesecondexamplev1.FakeSecondExampleV1{Fake: &c.Fake}
+}
+
+// SecondExample retrieves the SecondExampleV1Client
+func (c *Clientset) SecondExample() secondexamplev1.SecondExampleV1Interface {
 	return &fakesecondexamplev1.FakeSecondExampleV1{Fake: &c.Fake}
 }

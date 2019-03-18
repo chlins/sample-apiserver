@@ -17,8 +17,8 @@ spec:
       serviceAccountName: apiserver
       containers:
       - name: wardle-server
-        image: kube-sample-apiserver:latest
-        imagePullPolicy: Never
+        image: 49.4.2.82:50123/kube-sample-apiserver:latest
+        imagePullPolicy: Always
         command: [ "/kube-sample-apiserver", "--etcd-servers=http://localhost:2379" ]
       - name: etcd
-        image: quay.io/coreos/etcd:v3.3.10
+        image: quay.io/coreos/etcd:v3.1.12

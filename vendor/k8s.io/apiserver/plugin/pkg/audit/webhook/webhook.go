@@ -21,9 +21,13 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apimachinery/announced"
+	"k8s.io/apimachinery/pkg/apimachinery/registered"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	auditinternal "k8s.io/apiserver/pkg/apis/audit"
 	"k8s.io/apiserver/pkg/apis/audit/install"
+	auditv1alpha1 "k8s.io/apiserver/pkg/apis/audit/v1alpha1"
+	auditv1beta1 "k8s.io/apiserver/pkg/apis/audit/v1beta1"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/util/webhook"
 	"k8s.io/client-go/rest"
@@ -38,30 +42,31 @@ const (
 	DefaultInitialBackoff = 10 * time.Second
 )
 
+var (
+	// NOTE: Copied from other webhook implementations
+	//
+	// Can we make these passable to NewGenericWebhook?
+	groupFactoryRegistry = make(announced.APIGroupFactoryRegistry)
+	// TODO(audit): figure out a general way to let the client choose their preferred version
+	registry = registered.NewOrDie("")
+)
+
 func init() {
-	install.Install(audit.Scheme)
+	allGVs := []schema.GroupVersion{auditv1alpha1.SchemeGroupVersion, auditv1beta1.SchemeGroupVersion}
+	registry.RegisterVersions(allGVs)
+	if err := registry.EnableVersions(allGVs...); err != nil {
+		panic(fmt.Sprintf("failed to enable version %v", allGVs))
+	}
+	install.Install(groupFactoryRegistry, registry, audit.Scheme)
 }
 
 func loadWebhook(configFile string, groupVersion schema.GroupVersion, initialBackoff time.Duration) (*webhook.GenericWebhook, error) {
-	return webhook.NewGenericWebhook(audit.Scheme, audit.Codecs, configFile,
+	return webhook.NewGenericWebhook(registry, audit.Codecs, configFile,
 		[]schema.GroupVersion{groupVersion}, initialBackoff)
 }
 
 type backend struct {
-	w    *webhook.GenericWebhook
-	name string
-}
-
-// NewDynamicBackend returns an audit backend configured from a REST client that
-// sends events over HTTP to an external service.
-func NewDynamicBackend(rc *rest.RESTClient, initialBackoff time.Duration) audit.Backend {
-	return &backend{
-		w: &webhook.GenericWebhook{
-			RestClient:     rc,
-			InitialBackoff: initialBackoff,
-		},
-		name: fmt.Sprintf("dynamic_%s", PluginName),
-	}
+	w *webhook.GenericWebhook
 }
 
 // NewBackend returns an audit backend that sends events over HTTP to an external service.
@@ -70,7 +75,7 @@ func NewBackend(kubeConfigFile string, groupVersion schema.GroupVersion, initial
 	if err != nil {
 		return nil, err
 	}
-	return &backend{w: w, name: PluginName}, nil
+	return &backend{w}, nil
 }
 
 func (b *backend) Run(stopCh <-chan struct{}) error {
@@ -81,12 +86,10 @@ func (b *backend) Shutdown() {
 	// nothing to do here
 }
 
-func (b *backend) ProcessEvents(ev ...*auditinternal.Event) bool {
+func (b *backend) ProcessEvents(ev ...*auditinternal.Event) {
 	if err := b.processEvents(ev...); err != nil {
-		audit.HandlePluginError(b.String(), err, ev...)
-		return false
+		audit.HandlePluginError(PluginName, err, ev...)
 	}
-	return true
 }
 
 func (b *backend) processEvents(ev ...*auditinternal.Event) error {
@@ -100,5 +103,5 @@ func (b *backend) processEvents(ev ...*auditinternal.Event) error {
 }
 
 func (b *backend) String() string {
-	return b.name
+	return PluginName
 }

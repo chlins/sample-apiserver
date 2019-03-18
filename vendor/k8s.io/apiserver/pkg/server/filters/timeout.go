@@ -18,12 +18,10 @@ package filters
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"runtime"
 	"sync"
 	"time"
 
@@ -35,37 +33,34 @@ import (
 var errConnKilled = fmt.Errorf("killing connection/stream because serving request timed out and response had been started")
 
 // WithTimeoutForNonLongRunningRequests times out non-long-running requests after the time given by timeout.
-func WithTimeoutForNonLongRunningRequests(handler http.Handler, longRunning apirequest.LongRunningRequestCheck, timeout time.Duration) http.Handler {
+func WithTimeoutForNonLongRunningRequests(handler http.Handler, requestContextMapper apirequest.RequestContextMapper, longRunning apirequest.LongRunningRequestCheck, timeout time.Duration) http.Handler {
 	if longRunning == nil {
 		return handler
 	}
-	timeoutFunc := func(req *http.Request) (*http.Request, <-chan time.Time, func(), *apierrors.StatusError) {
+	timeoutFunc := func(req *http.Request) (<-chan time.Time, func(), *apierrors.StatusError) {
 		// TODO unify this with apiserver.MaxInFlightLimit
-		ctx := req.Context()
+		ctx, ok := requestContextMapper.Get(req)
+		if !ok {
+			// if this happens, the handler chain isn't setup correctly because there is no context mapper
+			return time.After(timeout), func() {}, apierrors.NewInternalError(fmt.Errorf("no context found for request during timeout"))
+		}
 
 		requestInfo, ok := apirequest.RequestInfoFrom(ctx)
 		if !ok {
 			// if this happens, the handler chain isn't setup correctly because there is no request info
-			return req, time.After(timeout), func() {}, apierrors.NewInternalError(fmt.Errorf("no request info found for request during timeout"))
+			return time.After(timeout), func() {}, apierrors.NewInternalError(fmt.Errorf("no request info found for request during timeout"))
 		}
 
 		if longRunning(req, requestInfo) {
-			return req, nil, nil, nil
+			return nil, nil, nil
 		}
-
-		ctx, cancel := context.WithCancel(ctx)
-		req = req.WithContext(ctx)
-
-		postTimeoutFn := func() {
-			cancel()
-			metrics.Record(req, requestInfo, metrics.APIServerComponent, "", http.StatusGatewayTimeout, 0, 0)
+		metricFn := func() {
+			metrics.Record(req, requestInfo, "", http.StatusGatewayTimeout, 0, 0)
 		}
-		return req, time.After(timeout), postTimeoutFn, apierrors.NewTimeoutError(fmt.Sprintf("request did not complete within %s", timeout), 0)
+		return time.After(timeout), metricFn, apierrors.NewTimeoutError(fmt.Sprintf("request did not complete within %s", timeout), 0)
 	}
 	return WithTimeout(handler, timeoutFunc)
 }
-
-type timeoutFunc = func(*http.Request) (req *http.Request, timeout <-chan time.Time, postTimeoutFunc func(), err *apierrors.StatusError)
 
 // WithTimeout returns an http.Handler that runs h with a timeout
 // determined by timeoutFunc. The new http.Handler calls h.ServeHTTP to handle
@@ -76,45 +71,33 @@ type timeoutFunc = func(*http.Request) (req *http.Request, timeout <-chan time.T
 // http.ErrHandlerTimeout. If timeoutFunc returns a nil timeout channel, no
 // timeout will be enforced. recordFn is a function that will be invoked whenever
 // a timeout happens.
-func WithTimeout(h http.Handler, timeoutFunc timeoutFunc) http.Handler {
+func WithTimeout(h http.Handler, timeoutFunc func(*http.Request) (timeout <-chan time.Time, recordFn func(), err *apierrors.StatusError)) http.Handler {
 	return &timeoutHandler{h, timeoutFunc}
 }
 
 type timeoutHandler struct {
 	handler http.Handler
-	timeout timeoutFunc
+	timeout func(*http.Request) (<-chan time.Time, func(), *apierrors.StatusError)
 }
 
 func (t *timeoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	r, after, postTimeoutFn, err := t.timeout(r)
+	after, recordFn, err := t.timeout(r)
 	if after == nil {
 		t.handler.ServeHTTP(w, r)
 		return
 	}
 
-	errCh := make(chan interface{})
+	done := make(chan struct{})
 	tw := newTimeoutWriter(w)
 	go func() {
-		defer func() {
-			err := recover()
-			if err != nil {
-				const size = 64 << 10
-				buf := make([]byte, size)
-				buf = buf[:runtime.Stack(buf, false)]
-				err = fmt.Sprintf("%v\n%s", err, buf)
-			}
-			errCh <- err
-		}()
 		t.handler.ServeHTTP(tw, r)
+		close(done)
 	}()
 	select {
-	case err := <-errCh:
-		if err != nil {
-			panic(err)
-		}
+	case <-done:
 		return
 	case <-after:
-		postTimeoutFn()
+		recordFn()
 		tw.timeout(err)
 	}
 }

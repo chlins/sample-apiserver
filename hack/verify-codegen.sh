@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # Copyright 2017 The Kubernetes Authors.
 #
@@ -18,7 +18,8 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
+SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")/..
+SCRIPT_BASE=${SCRIPT_ROOT}/../..
 
 DIFFROOT="${SCRIPT_ROOT}/pkg"
 TMP_DIFFROOT="${SCRIPT_ROOT}/_tmp/pkg"

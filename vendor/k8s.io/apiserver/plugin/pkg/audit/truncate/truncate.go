@@ -62,7 +62,6 @@ type backend struct {
 var _ audit.Backend = &backend{}
 
 // NewBackend returns a new truncating backend, using configuration passed in the parameters.
-// Truncate backend automatically runs and shut downs the delegate backend.
 func NewBackend(delegateBackend audit.Backend, config Config, groupVersion schema.GroupVersion) audit.Backend {
 	return &backend{
 		delegateBackend: delegateBackend,
@@ -71,12 +70,11 @@ func NewBackend(delegateBackend audit.Backend, config Config, groupVersion schem
 	}
 }
 
-func (b *backend) ProcessEvents(events ...*auditinternal.Event) bool {
+func (b *backend) ProcessEvents(events ...*auditinternal.Event) {
 	var errors []error
 	var impacted []*auditinternal.Event
 	var batch []*auditinternal.Event
 	var batchSize int64
-	success := true
 	for _, event := range events {
 		size, err := b.calcSize(event)
 		// If event was correctly serialized, but the size is more than allowed
@@ -98,7 +96,7 @@ func (b *backend) ProcessEvents(events ...*auditinternal.Event) bool {
 		}
 
 		if len(batch) > 0 && batchSize+size > b.c.MaxBatchSize {
-			success = b.delegateBackend.ProcessEvents(batch...) && success
+			b.delegateBackend.ProcessEvents(batch...)
 			batch = []*auditinternal.Event{}
 			batchSize = 0
 		}
@@ -108,13 +106,12 @@ func (b *backend) ProcessEvents(events ...*auditinternal.Event) bool {
 	}
 
 	if len(batch) > 0 {
-		success = b.delegateBackend.ProcessEvents(batch...) && success
+		b.delegateBackend.ProcessEvents(batch...)
 	}
 
 	if len(impacted) > 0 {
 		audit.HandlePluginError(PluginName, utilerrors.NewAggregate(errors), impacted...)
 	}
-	return success
 }
 
 // truncate removed request and response objects from the audit events,
@@ -131,11 +128,12 @@ func truncate(e *auditinternal.Event) *auditinternal.Event {
 }
 
 func (b *backend) Run(stopCh <-chan struct{}) error {
-	return b.delegateBackend.Run(stopCh)
+	// Nothing to do here
+	return nil
 }
 
 func (b *backend) Shutdown() {
-	b.delegateBackend.Shutdown()
+	// Nothing to do here
 }
 
 func (b *backend) calcSize(e *auditinternal.Event) (int64, error) {

@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/munnerz/goautoneg"
+	"bitbucket.org/ww/goautoneg"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -133,8 +133,6 @@ type EndpointRestrictions interface {
 	AllowsStreamSchema(schema string) bool
 }
 
-// DefaultEndpointRestrictions is the default EndpointRestrictions which allows
-// content-type negotiation to verify server support for specific options
 var DefaultEndpointRestrictions = emptyEndpointRestrictions{}
 
 type emptyEndpointRestrictions struct{}

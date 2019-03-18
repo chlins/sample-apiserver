@@ -17,7 +17,6 @@ limitations under the License.
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -25,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/klog"
+	"github.com/golang/glog"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,16 +32,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apiserver/pkg/endpoints/handlers/negotiation"
 	"k8s.io/apiserver/pkg/endpoints/metrics"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	utiltrace "k8s.io/utils/trace"
+	utiltrace "k8s.io/apiserver/pkg/util/trace"
 )
 
 // getterFunc performs a get request with the given context and object name. The request
 // may be used to deserialize an options object to pass to the getter.
-type getterFunc func(ctx context.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error)
+type getterFunc func(ctx request.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error)
 
 // getResourceHandler is an HTTP handler function for get requests. It delegates to the
 // passed-in getterFunc to perform the actual get.
@@ -56,32 +54,33 @@ func getResourceHandler(scope RequestScope, getter getterFunc) http.HandlerFunc 
 			scope.err(err, w, req)
 			return
 		}
-		ctx := req.Context()
+		ctx := scope.ContextFunc(req)
 		ctx = request.WithNamespace(ctx, namespace)
-
-		outputMediaType, _, err := negotiation.NegotiateOutputMediaType(req, scope.Serializer, &scope)
-		if err != nil {
-			scope.err(err, w, req)
-			return
-		}
 
 		result, err := getter(ctx, name, req, trace)
 		if err != nil {
 			scope.err(err, w, req)
 			return
 		}
+		requestInfo, ok := request.RequestInfoFrom(ctx)
+		if !ok {
+			scope.err(fmt.Errorf("missing requestInfo"), w, req)
+			return
+		}
+		if err := setSelfLink(result, requestInfo, scope.Namer); err != nil {
+			scope.err(err, w, req)
+			return
+		}
 
 		trace.Step("About to write a response")
-		scope.Trace = trace
-		transformResponseObject(ctx, scope, req, w, http.StatusOK, outputMediaType, result)
-		trace.Step("Transformed response object")
+		transformResponseObject(ctx, scope, req, w, http.StatusOK, result)
 	}
 }
 
 // GetResource returns a function that handles retrieving a single resource from a rest.Storage object.
 func GetResource(r rest.Getter, e rest.Exporter, scope RequestScope) http.HandlerFunc {
 	return getResourceHandler(scope,
-		func(ctx context.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error) {
+		func(ctx request.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error) {
 			// check for export
 			options := metav1.GetOptions{}
 			if values := req.URL.Query(); len(values) > 0 {
@@ -111,7 +110,7 @@ func GetResource(r rest.Getter, e rest.Exporter, scope RequestScope) http.Handle
 // GetResourceWithOptions returns a function that handles retrieving a single resource from a rest.Storage object.
 func GetResourceWithOptions(r rest.GetterWithOptions, scope RequestScope, isSubresource bool) http.HandlerFunc {
 	return getResourceHandler(scope,
-		func(ctx context.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error) {
+		func(ctx request.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error) {
 			opts, subpath, subpathKey := r.NewGetOptions()
 			trace.Step("About to process Get options")
 			if err := getRequestOptions(req, scope, opts, subpath, subpathKey, isSubresource); err != nil {
@@ -138,7 +137,7 @@ func getRequestOptions(req *http.Request, scope RequestScope, into runtime.Objec
 			newQuery[k] = v
 		}
 
-		ctx := req.Context()
+		ctx := scope.ContextFunc(req)
 		requestInfo, _ := request.RequestInfoFrom(ctx)
 		startingIndex := 2
 		if isSubresource {
@@ -182,14 +181,8 @@ func ListResource(r rest.Lister, rw rest.Watcher, scope RequestScope, forceWatch
 			hasName = false
 		}
 
-		ctx := req.Context()
+		ctx := scope.ContextFunc(req)
 		ctx = request.WithNamespace(ctx, namespace)
-
-		outputMediaType, _, err := negotiation.NegotiateOutputMediaType(req, scope.Serializer, &scope)
-		if err != nil {
-			scope.err(err, w, req)
-			return
-		}
 
 		opts := metainternalversion.ListOptions{}
 		if err := metainternalversion.ParameterCodec.DecodeParameters(req.URL.Query(), scope.MetaGroupVersion, &opts); err != nil {
@@ -202,7 +195,7 @@ func ListResource(r rest.Lister, rw rest.Watcher, scope RequestScope, forceWatch
 		// TODO: DecodeParametersInto should do this.
 		if opts.FieldSelector != nil {
 			fn := func(label, value string) (newLabel, newValue string, err error) {
-				return scope.Convertor.ConvertFieldLabel(scope.Kind, label, value)
+				return scope.Convertor.ConvertFieldLabel(scope.Kind.GroupVersion().String(), scope.Kind.Kind, label, value)
 			}
 			if opts.FieldSelector, err = opts.FieldSelector.Transform(fn); err != nil {
 				// TODO: allow bad request to set field causes based on query parameters
@@ -214,25 +207,19 @@ func ListResource(r rest.Lister, rw rest.Watcher, scope RequestScope, forceWatch
 
 		if hasName {
 			// metadata.name is the canonical internal name.
-			// SelectionPredicate will notice that this is a request for
-			// a single object and optimize the storage query accordingly.
+			// SelectionPredicate will notice that this is
+			// a request for a single object and optimize the
+			// storage query accordingly.
 			nameSelector := fields.OneTermEqualSelector("metadata.name", name)
-
-			// Note that fieldSelector setting explicitly the "metadata.name"
-			// will result in reaching this branch (as the value of that field
-			// is propagated to requestInfo as the name parameter.
-			// That said, the allowed field selectors in this branch are:
-			// nil, fields.Everything and field selector matching metadata.name
-			// for our name.
 			if opts.FieldSelector != nil && !opts.FieldSelector.Empty() {
-				selectedName, ok := opts.FieldSelector.RequiresExactMatch("metadata.name")
-				if !ok || name != selectedName {
-					scope.err(errors.NewBadRequest("fieldSelector metadata.name doesn't match requested name"), w, req)
-					return
-				}
-			} else {
-				opts.FieldSelector = nameSelector
+				// It doesn't make sense to ask for both a name
+				// and a field selector, since just the name is
+				// sufficient to narrow down the request to a
+				// single object.
+				scope.err(errors.NewBadRequest("both a name and a field selector provided; please provide one or the other."), w, req)
+				return
 			}
+			opts.FieldSelector = nameSelector
 		}
 
 		if opts.Watch || forceWatch {
@@ -248,7 +235,7 @@ func ListResource(r rest.Lister, rw rest.Watcher, scope RequestScope, forceWatch
 			if timeout == 0 && minRequestTimeout > 0 {
 				timeout = time.Duration(float64(minRequestTimeout) * (rand.Float64() + 1.0))
 			}
-			klog.V(3).Infof("Starting watch for %s, rv=%s labels=%s fields=%s timeout=%s", req.URL.Path, opts.ResourceVersion, opts.LabelSelector, opts.FieldSelector, timeout)
+			glog.V(2).Infof("Starting watch for %s, rv=%s labels=%s fields=%s timeout=%s", req.URL.Path, opts.ResourceVersion, opts.LabelSelector, opts.FieldSelector, timeout)
 
 			watcher, err := rw.Watch(ctx, &opts)
 			if err != nil {
@@ -256,7 +243,7 @@ func ListResource(r rest.Lister, rw rest.Watcher, scope RequestScope, forceWatch
 				return
 			}
 			requestInfo, _ := request.RequestInfoFrom(ctx)
-			metrics.RecordLongRunning(req, requestInfo, metrics.APIServerComponent, func() {
+			metrics.RecordLongRunning(req, requestInfo, func() {
 				serveWatch(watcher, scope, req, w, timeout)
 			})
 			return
@@ -271,9 +258,21 @@ func ListResource(r rest.Lister, rw rest.Watcher, scope RequestScope, forceWatch
 			return
 		}
 		trace.Step("Listing from storage done")
+		numberOfItems, err := setListSelfLink(result, ctx, req, scope.Namer)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+		trace.Step("Self-linking done")
+		// Ensure empty lists return a non-nil items slice
+		if numberOfItems == 0 && meta.IsListType(result) {
+			if err := meta.SetList(result, []runtime.Object{}); err != nil {
+				scope.err(err, w, req)
+				return
+			}
+		}
 
-		scope.Trace = trace
-		transformResponseObject(ctx, scope, req, w, http.StatusOK, outputMediaType, result)
-		trace.Step(fmt.Sprintf("Writing http response done (%d items)", meta.LenList(result)))
+		transformResponseObject(ctx, scope, req, w, http.StatusOK, result)
+		trace.Step(fmt.Sprintf("Writing http response done (%d items)", numberOfItems))
 	}
 }

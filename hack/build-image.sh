@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # Copyright 2017 The Kubernetes Authors.
 #
@@ -14,11 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -o errexit
-set -o nounset
-set -o pipefail
 
-KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../../../../..
+KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../../../../..
 source "${KUBE_ROOT}/hack/lib/util.sh"
 
 # Register function to be called on EXIT to remove generated binary.
